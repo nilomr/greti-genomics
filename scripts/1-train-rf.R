@@ -24,7 +24,6 @@ immigrant.gds <- file.path(config$path$data, "immigrant_recode.gds")
 resident.gds <- file.path(config$path$data, "resident_recode.gds")
 all.gds <- file.path(config$path$data, "all_recode.gds")
 
-
 # Load all the data
 all.maf <- SNPRelate::snpgdsOpen(all.gds, allow.duplicate = TRUE)
 
@@ -40,7 +39,6 @@ resident.id <- gdsfmt::read.gdsn(gdsfmt::index.gdsn(
 
 all.id <- gdsfmt::read.gdsn(gdsfmt::index.gdsn(all.maf, "sample.id"))
 all.label <- ifelse(all.id %in% immigrant.id, "immigrant", "resident")
-
 
 # Function to split data into training and testing sets
 split_data <- function(all.id, all.label, percent.train) {
@@ -338,8 +336,6 @@ ggplot2::ggsave(file.path(config$path$figures, "oob_plot.jpg"),
 )
 
 # get data from tree 100 to tree 500 and plot the distribution of percent correct
-
-
 oob_df <- dplyr::bind_rows(
     list(
         oob_df = plot_data$oob_df,
@@ -351,7 +347,6 @@ oob_df <- dplyr::bind_rows(
 
 # get the MDS plot data
 # run a single random forest model:
-
 set.seed(123)
 split <- split_data(all.id, all.label, percent.train)
 data <- prepare_data(
@@ -524,10 +519,187 @@ rf_combi_plot <- oob_dist_plot +
 
 # save the plot
 ggplot2::ggsave(
-    file.path(config$path$figures, "mds_combi_plot.jpg"),
+    file.path(config$path$figures, "mds_combi_plot.svg"),
     plot = rf_combi_plot,
     width = 15,
     height = 11,
     units = "cm",
+    bg = "white",
+    device = svg
+)
+
+# Let's run the RF to create a proximity space a bunch of times and get average positions/results for each data point
+# Run multiple RFs to get average positions/results for each data point
+
+split <- split_data(all.id, all.label, percent.train)
+data <- prepare_data(
+    all.maf, split$train.id, split$test.id, split$train.label, split$test.label,
+    num.eigenvectors, num.threads
+)
+
+# Use all available data for proximity analysis
+data <- data$train_df |> dplyr::bind_rows(data$test_df)
+
+# Run RF multiple times with different seeds
+n_iterations <- 50
+proximity_matrices <- lapply(1:n_iterations, function(i) {
+    set.seed(i)
+    rf <- randomForest::randomForest(
+        data[, 3:(2 + num.eigenvectors)],
+        y = as.factor(data$pop),
+        ntree = 300,
+        replace = FALSE,
+        proximity = TRUE,
+        oob.prox = TRUE
+    )
+    list(
+        proximity = rf$proximity,
+        predictions = rf$predicted
+    )
+})
+
+# Calculate average proximity matrix and predictions
+avg_proximity <- Reduce('+', lapply(proximity_matrices, `[[`, "proximity")) / n_iterations
+prediction_matrix <- do.call(cbind, lapply(proximity_matrices, `[[`, "predictions"))
+
+# Convert predictions to frequencies
+prediction_counts <- prediction_matrix |>
+    as.data.frame() |>
+    apply(1, function(x) {
+        x_num <- as.numeric(x)
+        c(
+            immigrant = mean(x_num == 1),
+            resident = mean(x_num == 2)
+        )
+    }) |>
+    t()
+
+# Calculate MDS from average proximity
+avg_dist <- 1 - avg_proximity
+avg_mds <- stats::cmdscale(avg_dist, k = 2)
+
+# Create final dataframe with all results
+final_mds_df <- data.frame(
+    individual = data$sample.id,
+    status = data$pop,
+    MDS1 = avg_mds[,1],
+    MDS2 = avg_mds[,2],
+    pred_immigrant = prediction_counts[,"immigrant"],
+    pred_resident = prediction_counts[,"resident"]
+) |> dplyr::as_tibble()
+
+# Plot this average mds, with color by status and alpha by how strongly it was predicted to be the right status
+mds_plot_avg <- ggplot2::ggplot(final_mds_df, 
+    ggplot2::aes(x = MDS1, y = MDS2)) +
+    ggplot2::geom_point(
+        ggplot2::aes(
+            color = status,
+            alpha = ifelse(status == "immigrant", 
+                pred_immigrant, 
+                pred_resident)
+        ),
+        size = 3
+    ) +
+    ggplot2::scale_color_manual(values = c(
+        "immigrant" = "#5d8566", 
+        "resident" = "#c29007"
+    )) +
+    ggplot2::scale_alpha(range = c(0.2, 1)) +
+    titheme() +
+    ggplot2::labs(
+        title = "Average MDS plot from multiple random forests",
+        x = "MDS1", y = "MDS2"
+    ) +
+    ggplot2::theme(
+        aspect.ratio = 1.5,
+        legend.position = "inside",
+        legend.position.inside = c(0.95, 0.95),
+        legend.justification = c("right", "top")
+    ) +
+    base_breaks_x(range(-0.2, 0.6), expand = ggplot2::expansion(mult = .05)) +
+    base_breaks_y(range(-0.2, 0.6), expand = ggplot2::expansion(mult = .05)) +
+    ggplot2::guides(alpha = "none")
+
+# Save the plot
+ggplot2::ggsave(
+    file.path(config$path$figures, "mds_avg_plot.jpg"),
+    plot = mds_plot_avg,
+    width = 8,
+    height = 6,
     bg = "white"
 )
+
+
+# Plot mds1 and ms2 separately, colored by status again.
+# Create separate density plots for MDS1 and MDS2
+mds1_plot <- ggplot2::ggplot(final_mds_df) +
+    ggdist::stat_slab(
+        ggplot2::aes(x = MDS1, fill = status),
+        position = "identity", alpha = 0.7
+    ) +
+    ggplot2::scale_fill_manual(values = c(
+        "immigrant" = "#5d8566", "resident" = "#c29007"
+    )) +
+    ggplot2::scale_color_manual(values = c(
+        "immigrant" = "#5d8566", "resident" = "#c29007"
+    )) +
+    titheme() +
+    base_breaks_x(range(-0.2, 0.6), expand = ggplot2::expansion(mult = .05)) +
+    base_breaks_y(range(0, 1), expand = ggplot2::expansion(mult = .05)) +
+    ggplot2::labs(x = "MDS1", y = "Density") +
+    ggplot2::theme(
+        legend.position = "inside",
+        legend.position.inside = c(0.95, 0.95),
+        legend.justification = c("right", "top"),
+        legend.title = ggplot2::element_text(hjust = 1)
+    ) +
+    ggplot2::guides(
+        fill = ggplot2::guide_legend(
+            title = "Class",
+            label.position = "left",
+            label.hjust = 1
+        ),
+        color = "none"
+    ) 
+
+mds2_plot <- ggplot2::ggplot(final_mds_df) +
+    ggdist::stat_slab(
+        ggplot2::aes(x = MDS2, fill = status),
+        position = "identity", alpha = 0.7
+    ) +
+    ggplot2::scale_fill_manual(values = c(
+        "immigrant" = "#5d8566", "resident" = "#c29007"
+    )) +
+    ggplot2::scale_color_manual(values = c(
+        "immigrant" = "#5d8566", "resident" = "#c29007"
+    )) +
+    titheme() +
+        base_breaks_x(range(-0.2, 0.6), expand = ggplot2::expansion(mult = .05)) +
+    base_breaks_y(range(0, 1), expand = ggplot2::expansion(mult = .05)) +
+    ggplot2::labs(x = "MDS2", y = "Density") +
+    ggplot2::theme(
+        legend.position = "none"
+    )
+
+# Combine plots
+mds_density_plot <- mds1_plot + mds2_plot +
+    patchwork::plot_layout(guides = "collect") +
+    patchwork::plot_annotation(
+        tag_levels = "A"
+    ) &
+    ggplot2::theme(
+        plot.title = ggplot2::element_blank(),
+        plot.tag = ggplot2::element_text(face = "plain")
+    )
+
+# Save the plot
+ggplot2::ggsave(
+    file.path(config$path$figures, "mds_density_plot.jpg"),
+    plot = mds_density_plot,
+    width = 12,
+    height = 4,
+    bg = "white"
+)
+
+# export the dataframe to a csv file
+write.csv(final_mds_df, file.path(config$path$data, "final_mds_df.csv"), row.names = FALSE)
