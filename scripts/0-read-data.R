@@ -1,10 +1,6 @@
 # Import configuration file
 config <- config::get()
 
-# parameters
-percent.train <- 0.7
-num.threads <- 44
-num.eigenvectors <- 20
 set.seed(555)
 
 # Input files
